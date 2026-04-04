@@ -1,5 +1,5 @@
 # 🌫️ Air Quality Index (AQI) Forecasting — Delhi/NCR Region
-### A Comprehensive Time Series Analysis Using SARIMA, SARIMAX, VECM, GARCH & Multivariate LSTM
+### A Comprehensive Time Series Analysis Using SARIMA, SARIMAX, VAR, ARDL, GARCH & Multivariate LSTM
 
 ## 📌 Project Overview
 
@@ -37,22 +37,31 @@ AQI Forecasting Pipeline
 │   └── Breusch-Pagan Test (Heteroskedasticity)
 │
 ├── 3. Univariate Modelling
-│   ├── ARIMA Grid Search
+│   ├── ARIMA Grid Search (manual p, d, q via AIC/BIC heatmaps)
 │   ├── SARIMA Grid Search (seasonal period s=4)
 │   └── SARIMA + GARCH(2,2)-skewt
 │
 ├── 4. Multivariate Modelling
 │   ├── SARIMAX + GARCH (with exogenous features)
-│   ├── Johansen Cointegration Test
-│   ├── VECM (Vector Error Correction Model)
-│   └── VECM + GARCH(2,2)-skewt
+│   ├── VAR — Vector Autoregression
+│   │   ├── Temperature first-differenced to I(0)
+│   │   ├── Lag selection via AIC / BIC / HQIC grid
+│   │   ├── Impulse Response Functions (IRF)
+│   │   └── Forecast Error Variance Decomposition (FEVD)
+│   ├── ARDL — Autoregressive Distributed Lag (Pesaran et al. 2001)
+│   │   ├── Mixed I(0)/I(1) variables — no pre-classification needed
+│   │   ├── Lag selection via AIC / BIC grid (manual p heatmap)
+│   │   ├── PSS Bounds Test for long-run relationship
+│   │   └── Error Correction Model (ECM) if bounds test passes
+│   └── ARCH Test + GARCH(2,2)-skewt on VAR & ARDL residuals
 │
 ├── 5. Deep Learning
 │   └── Multivariate LSTM (2-layer, with Dropout)
 │
 └── 6. Evaluation & Comparison
-    ├── Rolling Window Validation (4-day horizon)
+    ├── Rolling Window Validation (4-step horizon)
     ├── MAE, RMSE, MAPE, SMAPE, R², CI Coverage
+    ├── Diebold-Mariano Test (pairwise forecast accuracy)
     └── December 2025 Final Comparison Plot
 ```
 
@@ -64,14 +73,15 @@ AQI Forecasting Pipeline
 aqi-forecasting/
 │
 ├── data/
-│   └── aqi_delhi_ncr.csv           # Raw dataset (2020–2026, 4 readings/day)
+│   └── aqi_delhi_ncr.csv                # Raw dataset (2020–2026, 4 readings/day)
 │
 ├── notebooks/
-│   ├── S1-NSIT Dwarka_Delhi.ipynb  
-│   ├── S2-Mandir Marg_Delhi.ipynb     
-│   ├── S3-Greater_Noida.ipynb     
-│   ├── S4-Dwarka_Sec8_Delhi.ipynb           
-│   ├── EDA.ipynb            
+│   ├── EDA.ipynb                        # Exploratory data analysis
+│   ├── S1-NSIT_Dwarka_Delhi.ipynb
+│   ├── S2-Mandir_Marg_Delhi.ipynb
+│   ├── S3-Greater_Noida.ipynb
+│   ├── S4-Dwarka_Sec8_Delhi.ipynb
+│   └── S5-Siri_Fort_Delhi.ipynb
 │
 ├── requirements.txt
 └── README.md
@@ -86,22 +96,53 @@ aqi-forecasting/
 **Feature Engineering:**
 - PCA applied to correlated pollutants (PM2.5, PM10, CO, NO₂, SO₂) — PC1 captured **97% of combined variance**, resolving severe multicollinearity (VIF up to 197)
 - Feature selection using three criteria jointly: correlation with AQI (|r| > 0.3), VIF (< 10), and Granger causality (p < 0.05)
-- Final exogenous features selected: `pollution_pc1`, `visibility`, `o3`, `wind_speed`
+- Final exogenous features selected: `pollution_pc1`, `visibility`, `o3`, `wind_speed`, `temperature`, `humidity`
 
 ### 2. Stationarity Testing
 
-All variables tested using ADF and KPSS tests jointly. AQI was borderline stationary (ADF p=0.04), confirming `d=0` for ARIMA/SARIMA. Temperature was non-stationary and first-differenced before use in VECM.
+All variables tested using ADF and KPSS jointly. AQI was borderline stationary (ADF p = 0.048), confirming `d = 0` for ARIMA/SARIMA. Temperature was I(1) and handled differently per model — first-differenced before VAR, used at levels in ARDL (which accepts mixed integration orders).
 
 ### 3. SARIMA + GARCH
 
+- Parameters selected **manually** via AIC/BIC grid search — all candidate (p, d, q) and (P, D, Q) combinations printed as tables and visualised as heatmaps; the order where both AIC and BIC are simultaneously minimised is selected
 - Best SARIMA order: **(2, 0, 2)(2, 0, 2, 4)** — seasonal period s=4 captures the intraday cycle (4 readings/day)
-- GARCH residual diagnostics confirmed strong ARCH effects (p=0.0000) — volatility clustering present in residuals
-- Best GARCH: **(2, 2) with Skewed Student-t distribution** justified by kurtosis ~8 and slight positive skew in residuals
-- Post-GARCH diagnostics: ARCH p=1.00, Ljung-Box p=1.00 — residuals fully cleaned
+- GARCH residual diagnostics confirmed strong ARCH effects (p = 0.0000) — volatility clustering present in residuals
+- Best GARCH: **(2, 2) with Skewed Student-t distribution** — justified by kurtosis ≈ 8 and slight positive skew in residuals
+- Post-GARCH diagnostics: ARCH p = 1.00, Ljung-Box p = 1.00 — residuals fully cleaned
 
-### 4. Cointegration & VECM
+### 4. Multivariate Modelling — VAR and ARDL
 
-Johansen cointegration test confirmed **6 cointegrating relationships** among 7 variables — making VECM the statistically correct multivariate model over plain VAR. Optimal lag order selected by AIC: k=8.
+**Why not VECM?**
+The Johansen cointegration test was run on the 7-variable system but yielded extremely large trace statistics (e.g. 13,870 vs critical value 125). This is a well-known spurious result: Johansen requires all variables to be I(1), and when run on a mixed I(0)/I(1) system with a large sample it almost always rejects, making the cointegration conclusion meaningless. VECM was therefore not used.
+
+**Model selection logic:**
+
+| Scenario | Model Used |
+|---|---|
+| All variables I(0) | VAR |
+| All variables I(1) + cointegrated | VECM (not applicable here) |
+| Mix of I(0) and I(1) — none I(2) | ARDL |
+| ARCH effects in residuals | GARCH on residuals |
+
+**VAR (Vector Autoregression)**
+- Temperature first-differenced to achieve stationarity before fitting
+- Lag order p selected via AIC/BIC/HQIC grid — criteria plotted as line charts; BIC minimum used as the parsimonious choice
+- Portmanteau whiteness test and Jarque-Bera normality test run on residuals
+- IRF traces dynamic responses to shocks across all variables
+- FEVD decomposes forecast error variance by source variable
+
+**ARDL (Pesaran, Shin & Smith 2001)**
+- Accepts mixed I(0)/I(1) variables without pre-classification — the correct choice given temperature is I(1) while all other variables are I(0)
+- Lag p selected manually via AIC/BIC heatmap; exog lags selected via stepwise `ardl_select_order`
+- PSS Bounds Test: F-statistic compared to I(0) lower bound and I(1) upper bound at 1%, 5%, 10% significance
+- If bounds test confirms a long-run relationship: ECM fitted with ECT coefficient (α < 0 and significant confirms stable equilibrium); speed of adjustment and shock half-life reported
+- CUSUM stability test confirms structural stability of coefficients
+
+**GARCH on Residuals**
+- Engle (1982) ARCH LM test applied to both VAR and ARDL residuals
+- If ARCH effects detected: GARCH(p,q) grid searched with order selection via AIC/BIC heatmap; EGARCH and GJR-GARCH also tested for asymmetric effects
+- Best GARCH: **(2, 2) with Skewed Student-t** — consistent with SARIMA findings across stations
+- Standardised residual diagnostics confirm ARCH removal post-GARCH
 
 ### 5. Multivariate LSTM
 
@@ -157,35 +198,27 @@ scipy>=1.11.0
 ```python
 import pandas as pd
 import numpy as np
-from src.preprocessing import apply_pca
-from src.models.sarima_garch import sarima_grid_search
-from src.models.lstm import train_evaluate_lstm
 
 # Load data
 df = pd.read_csv('data/aqi_delhi_ncr.csv',
                  parse_dates=['datetime'],
                  index_col='datetime')
 
-# Apply PCA to compress correlated pollutants
-df = apply_pca(df, cols=['pm25', 'pm10', 'co', 'no2', 'so2'])
+# --- SARIMA (manual grid) ---
+# AIC/BIC heatmaps printed for each (p,d,q) and (P,D,Q) combination
+# See notebooks/S1-NSIT_Dwarka_Delhi.ipynb
 
-# Run SARIMA grid search
-results = sarima_grid_search(
-    df,
-    station_name   = 'NSIT Dwarka, Delhi',
-    p_range        = [1], d_range = [0], q_range = [1],
-    P_range        = range(0, 3), D_range = [0], Q_range = range(0, 3),
-    s              = 4
-)
+# --- VAR ---
+# run_var(data, var_cols, target='aqi', max_lags=14)
+# Temperature auto-differenced; lag selected via BIC grid
 
-# Train Multivariate LSTM
-lstm_result = train_evaluate_lstm(
-    df,
-    station_name = 'NSIT Dwarka, Delhi',
-    feature_cols = ['visibility', 'pollution_pc1', 'o3',
-                    'wind_speed', 'humidity', 'temperature'],
-    split_date   = '2024-01-01'
-)
+# --- ARDL + Bounds Test ---
+# run_ardl(data, dependent='aqi', regressors=[...], max_lag=8)
+# PSS bounds test + ECM if long-run relationship confirmed
+
+# --- ARCH / GARCH ---
+# run_arch_garch(residuals, garch_orders=[(1,1),(1,2),(2,1),(2,2)])
+# ARCH LM test → GARCH grid → conditional volatility plot
 ```
 
 ---
@@ -206,27 +239,32 @@ lstm_result = train_evaluate_lstm(
 ## 🔍 Key Findings
 
 **1. Log transform was not needed**
-Despite widespread heteroskedasticity (Breusch-Pagan p≈0), AQI skewness was near zero across all stations (max 0.31). The heteroskedasticity was structural — driven by seasonal pollution cycles — and required GARCH rather than log transformation.
+Despite widespread heteroskedasticity (Breusch-Pagan p ≈ 0), AQI skewness was near zero across all stations (max 0.31). The heteroskedasticity was structural — driven by seasonal pollution cycles — and required GARCH rather than log transformation.
 
 **2. SARIMA significantly outperforms ARIMA**
-The intraday seasonal cycle (s=4) is strong enough that plain ARIMA captures it accidentally through near-unit-root AR coefficients, causing unrealistic oscillating forecasts. SARIMA explicitly models this seasonal structure, improving AIC by ~116 points and producing cleaner forecasts.
+The intraday seasonal cycle (s = 4) is strong enough that plain ARIMA captures it accidentally through near-unit-root AR coefficients, causing unrealistic oscillating forecasts. SARIMA explicitly models this seasonal structure, improving AIC by ~116 points and producing cleaner forecasts.
 
 **3. GARCH improves uncertainty quantification, not point forecasts**
-GARCH does not change MAE/RMSE — it improves CI coverage by modelling volatility clustering. This is critical for public health decisions: models can now provide narrow confidence bands during calm summer periods and wide bands during volatile winter smog episodes.
+GARCH does not change MAE/RMSE — it improves CI coverage by modelling volatility clustering. This is critical for public health decisions: models now provide narrow confidence bands during calm summer periods and wide bands during volatile winter smog episodes.
 
-**4. VECM was required over VAR**
-Johansen cointegration test revealed 6 cointegrating relationships among 7 variables — ignoring these (as VAR does) yields biased and inconsistent estimates. VECM's error correction coefficient for AQI (α = -0.0845) implies 8.45% of any disequilibrium corrects per 6-hour period, with full correction in approximately 3 days.
+**4. VAR vs ARDL — different strengths**
+VAR captures symmetric short-run interdependencies and allows IRF/FEVD analysis of how shocks propagate across variables. ARDL is more appropriate for point forecasting of AQI specifically — it has a clear dependent variable, handles the mixed I(0)/I(1) system without differencing all variables, and confirms a long-run equilibrium through the Bounds Test. The ARDL ECT coefficient (α ≈ −0.085 at NSIT Dwarka) implies approximately 8.5% of any disequilibrium corrects per 6-hour period, with full correction in roughly 3 days.
 
-**5. LSTM captures non-linear regime behaviour**
-During the extreme winter smog period (December 2025), LSTM outperformed all statistical models by learning non-linear, regime-switching relationships from multivariate features — behaviour that linear models like SARIMA and VECM inherently cannot capture.
+**5. VECM was not applicable**
+The Johansen test was carried out but yielded spurious results (trace statistics far exceeding critical values) due to the mixed integration order of the variable set. ARDL's bounds test is the statistically correct long-run test for this data structure.
+
+**6. LSTM captures non-linear regime behaviour**
+During the extreme winter smog period (December 2025), LSTM outperformed all statistical models by learning non-linear, regime-switching relationships from multivariate features — behaviour that linear models like SARIMA and VAR inherently cannot capture.
 
 ---
 
 ## 📉 Limitations
 
 - SARIMAX underperformed relative to SARIMA due to the challenge of obtaining accurate future exogenous values; lag-4 features partially addressed this
+- VAR requires all variables to be stationary — differencing temperature before VAR means the model captures changes in temperature rather than temperature levels, which may lose some interpretability
+- ARDL long-run coefficients are sensitive to lag selection; BIC-based parsimony was prioritised to avoid overfitting
 - LSTM performance is sensitive to hyperparameters and may require retuning for different stations or time periods
-- Statistical models (SARIMA, VECM) trained on typical conditions may underperform during structurally different extreme pollution episodes
+- Statistical models (SARIMA, ARDL) trained on typical conditions may underperform during structurally different extreme pollution episodes
 
 ---
 
@@ -237,6 +275,7 @@ During the extreme winter smog period (December 2025), LSTM outperformed all sta
 - [ ] Add real-time forecasting pipeline using OpenAQ API
 - [ ] Deploy as a web dashboard with Streamlit
 - [ ] Incorporate meteorological forecast data (IMD) as exogenous inputs for SARIMAX
+- [ ] Explore ARDL-GARCH joint estimation for simultaneous mean and variance modelling
 - [ ] Explore Transformer-based architectures for long-horizon forecasting
 
 ---
@@ -245,8 +284,10 @@ During the extreme winter smog period (December 2025), LSTM outperformed all sta
 
 - Box, G.E.P., Jenkins, G.M. (1976). *Time Series Analysis: Forecasting and Control*
 - Engle, R.F. (1982). Autoregressive Conditional Heteroskedasticity. *Econometrica*
-- Johansen, S. (1991). Estimation and Hypothesis Testing of Cointegration Vectors. *Econometrica*
 - Bollerslev, T. (1986). Generalized Autoregressive Conditional Heteroskedasticity. *Journal of Econometrics*
+- Pesaran, M.H., Shin, Y., Smith, R.J. (2001). Bounds testing approaches to the analysis of level relationships. *Journal of Applied Econometrics*
+- Sims, C.A. (1980). Macroeconomics and Reality. *Econometrica* — foundational VAR paper
+- Diebold, F.X., Mariano, R.S. (1995). Comparing Predictive Accuracy. *Journal of Business & Economic Statistics*
 - Hyndman, R.J., Athanasopoulos, G. (2021). *Forecasting: Principles and Practice* (3rd ed.)
 - Central Pollution Control Board (CPCB), India — AQI Methodology
 
@@ -254,10 +295,10 @@ During the extreme winter smog period (December 2025), LSTM outperformed all sta
 
 ## 👤 Author
 
-**Koushik**
+**Arnab**
 - Project: AQI Forecasting — Delhi/NCR
-- Institution: [Banaras Hindu University]
-- Contact: [arnab.bhu.stcomp@gmail.com]
+- Institution: Banaras Hindu University
+- Contact: arnab.bhu.stcomp@gmail.com
 
 ---
 
